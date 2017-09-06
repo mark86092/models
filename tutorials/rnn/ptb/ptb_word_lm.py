@@ -106,6 +106,7 @@ class PTBInput(object):
     self.batch_size = batch_size = config.batch_size
     self.num_steps = num_steps = config.num_steps
     self.epoch_size = ((len(data) // batch_size) - 1) // num_steps
+    # 將 data 轉換成一個 shape = (batch_size, num_steps)
     self.input_data, self.targets = reader.ptb_producer(
         data, batch_size, num_steps, name=name)
 
@@ -123,24 +124,32 @@ class PTBModel(object):
     size = config.hidden_size
     vocab_size = config.vocab_size
 
+    # input_.input_data 的形狀是 (batch_size, num_steps)，是 sequence of ids (num_steps 長的 sequence)
+    # 透過 embedding_lookup 轉換成 dim = size 的 tensor
     with tf.device("/cpu:0"):
       embedding = tf.get_variable(
           "embedding", [vocab_size, size], dtype=data_type())
+      # inputs: (batch_size, num_steps, size)
       inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
 
     if is_training and config.keep_prob < 1:
+      # 如 paper 上寫的，實作虛線上的 dropout (only in training)
       inputs = tf.nn.dropout(inputs, config.keep_prob)
 
+    # output: (batch_size * num_steps, hidden_size)
+    # 這裏，size = config.hidden_size = LSTM output dim
     output, state = self._build_rnn_graph(inputs, config, is_training)
 
     softmax_w = tf.get_variable(
         "softmax_w", [size, vocab_size], dtype=data_type())
     softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
+    # logits: (batch_size * num_steps, vocab_size)
     logits = tf.nn.xw_plus_b(output, softmax_w, softmax_b)
      # Reshape logits to be a 3-D tensor for sequence loss
     logits = tf.reshape(logits, [self.batch_size, self.num_steps, vocab_size])
 
     # Use the contrib sequence loss and average over the batches
+    # loss --> (num_steps)
     loss = tf.contrib.seq2seq.sequence_loss(
         logits,
         input_.targets,
@@ -200,6 +209,7 @@ class PTBModel(object):
 
   def _get_lstm_cell(self, config, is_training):
     if config.rnn_mode == BASIC:
+      # 這邊比較不解 reuse = False 是怎麼運作
       return tf.contrib.rnn.BasicLSTMCell(
           config.hidden_size, forget_bias=0.0, state_is_tuple=True,
           reuse=not is_training)
@@ -218,6 +228,7 @@ class PTBModel(object):
       cell = tf.contrib.rnn.DropoutWrapper(
           cell, output_keep_prob=config.keep_prob)
 
+    # 不知道為什麼這裡的 cell 都用同一個 self._get_lstm_cell 出來的，這樣 weight 會怎麼處理？
     cell = tf.contrib.rnn.MultiRNNCell(
         [cell for _ in range(config.num_layers)], state_is_tuple=True)
 
@@ -238,6 +249,9 @@ class PTBModel(object):
         if time_step > 0: tf.get_variable_scope().reuse_variables()
         (cell_output, state) = cell(inputs[:, time_step, :], state)
         outputs.append(cell_output)
+    # cell_output --> (batch_size, hidden_size)
+    # tf.concat(outputs, 1) --> (batch_size, hidden_size * num_steps)
+    # output --> (batch_size * num_steps, hidden_size)
     output = tf.reshape(tf.concat(outputs, 1), [-1, config.hidden_size])
     return output, state
 
@@ -452,6 +466,8 @@ def main(_):
         % (len(gpus), FLAGS.num_gpus))
 
   raw_data = reader.ptb_raw_data(FLAGS.data_path)
+  # train_data, valid_data, test_data --> list of id
+  # _ --> number of words
   train_data, valid_data, test_data, _ = raw_data
 
   config = get_config()
